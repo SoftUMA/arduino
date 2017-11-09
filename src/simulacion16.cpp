@@ -401,7 +401,7 @@ int main(int argc, const char* argv[])
 	}
 	internal__::Serial.println("#-------------------------------------------");
 }
-#undef TMP_MAX
+#undef MAX_TEMP
 //--------------------------------------------------------------------------
 //-- Simulacion ------------------------------------------------------------
 //--------------------------------------------------------------------------
@@ -409,8 +409,8 @@ namespace simulacion__ {
 	// variacion de 2 grados centigrados en 5 segundos
 	static const double INCR_TMP_MS = 4.0/1000.0;
 	static const unsigned long PERIODO_SIMUL_MS = 100;
-	static const unsigned RELE1PIN = 2;
-	static const unsigned TMP1PIN = 0;
+	static const unsigned RELAY_PIN = 2;
+	static const unsigned TEMPERATURE_PIN = 0;
 	struct Simulacion {
 		unsigned long last_ms;
 		double val;
@@ -419,20 +419,20 @@ namespace simulacion__ {
 	static void simulacion_setup() {
 		simulacion.last_ms = -PERIODO_SIMUL_MS;
 		simulacion.val = 512;
-		setAnalogVal(TMP1PIN, simulacion.val);
+		setAnalogVal(TEMPERATURE_PIN, simulacion.val);
 	}
 	static void simulacion_loop() {
 		unsigned long curr_ms = millis();
 		if (curr_ms - simulacion.last_ms >= PERIODO_SIMUL_MS) {
 			simulacion.last_ms += PERIODO_SIMUL_MS;
 			if (curr_ms != 0) {
-				int rele = getDigitalVal(RELE1PIN);
+				int rele = getDigitalVal(RELAY_PIN);
 				double inc_tmp = (PERIODO_SIMUL_MS
 					* (rele == LOW ? -INCR_TMP_MS : +INCR_TMP_MS));
 				simulacion.val += inc_tmp;
 				simulacion.val = (simulacion.val < 0 ? 0 :
 					(simulacion.val > 1023 ? 1023 : simulacion.val) );
-				setAnalogVal(TMP1PIN, simulacion.val);
+				setAnalogVal(TEMPERATURE_PIN, simulacion.val);
 			}
 		}
 	}
@@ -441,139 +441,125 @@ namespace simulacion__ {
 //------------------------------------
 
 namespace user__ {
-	// :: new16 ::
-	const char* SALIDA = "simulacion_ej_16.plt";
-	// :: --- ::
 	#include <math.h>
+	const char* SALIDA = "bin/output/output16.plt";
 
-	inline float val2tmp(int val, float T0, float R0, float B) {
+	float val2tmp(int val, float T0, float R0, float B) {
 		float t, r;
-		r = ((1023.0 * 10e3) / float(val)) - 10e3;
+
+		r = ((1023.0 * 1000) / float(val)) - 1000;
 		T0 += 273.15;
 		t = 1.0 / ((1.0 / T0) + (log(r / R0) / B));
+
 		return t - 273.15;
 	}
-	
-	/*----------------------------------*/
+
+	// ================================
+	// Vars
 	
 	const float THERMISTOR_T0 = 25.0;
 	const float THERMISTOR_R0 = 10000.0;
 	const float THERMISTOR_B = 3977.0;
-
-	/*----------------------------------*/
-
-	// :: new16 ::
 	const float KP = 0.4044;
 	const float KI = 0.0100;
 	const float KD = 3.3718;
-	// :: ----- ::
+	const unsigned long MONITOR_PERIOD = 1000;
+	const unsigned long TEMPERATURE_PERIOD = 1000;
+	const unsigned long RELAY_PERIOD = 5000;
+	const byte RELAY_PIN = 2;
+	const byte RED_PIN = 3;
+	const byte GREEN_PIN = 5;
+	const byte TEMPERATURE_PIN = 0;
+	const float DESIRED_TEMP = 38.0;
+	const float MIN_TEMP = 36.0;
+	const float MAX_TEMP = 40.0;
 	
-	/*----------------------------------*/
+	// ================================
+	// Thermistor
 	
-	const unsigned long PERIODO_MTR_MS = 1000;
-	const unsigned long PERIODO_TMP_MS = 1000;
-	const unsigned long PERIODO_RELE_MS = 5000;
-	const byte RELE1PIN = 2;
-	const byte LEDRPIN = 3;
-	const byte LEDVPIN = 5;
-	const byte TMP1PIN = 0;
-	const float TMP_REF = 38.0;
-	const float TMP_MIN = 36.0;
-	const float TMP_MAX = 40.0;
-	
-	//-------------------------------------
-	
-	struct Tmp {
+	struct Temperature {
 		unsigned long last_ms;
 		float val;
 	};
 
-	void setup_tmp(unsigned long curr_ms, struct Tmp& tmp) {
-		pinMode(LEDVPIN, OUTPUT);
-		tmp.last_ms = curr_ms - PERIODO_TMP_MS;
+	void setup_temperature(unsigned long curr_ms, struct Temperature& tmp) {
+		pinMode(GREEN_PIN, OUTPUT);
+		tmp.last_ms = curr_ms - TEMPERATURE_PERIOD;
 		tmp.val = 0;
 	}
 
-	void tarea_tmp(unsigned long curr_ms, struct Tmp& tmp) {
-		if (curr_ms - tmp.last_ms >= PERIODO_TMP_MS) {
-			tmp.last_ms += PERIODO_TMP_MS;
-			int val = analogRead(TMP1PIN);
+	void loop_temperature(unsigned long curr_ms, struct Temperature& tmp) {
+		if (curr_ms - tmp.last_ms >= TEMPERATURE_PERIOD) {
+			tmp.last_ms += TEMPERATURE_PERIOD;
+			int val = analogRead(TEMPERATURE_PIN);
 			tmp.val = val2tmp(val, THERMISTOR_T0, THERMISTOR_R0, THERMISTOR_B);
-			byte est_tmp = (TMP_MIN <= tmp.val && tmp.val <= TMP_MAX) ? HIGH : LOW;
-			digitalWrite(LEDVPIN, est_tmp);
+			byte est_tmp = (MIN_TEMP <= tmp.val && tmp.val <= MAX_TEMP) ? HIGH : LOW;
+			digitalWrite(GREEN_PIN, est_tmp);
 		}
 	}
 
-	//-------------------------------------
+	// ================================
+	// Relay
 
-	struct Rele {
+	struct Relay {
 		unsigned long last_ms;
-		// :: new15 ::
 		unsigned long duty_cycle;
-		// :: --- ::
-		// :: new16 ::
 		float error;
 		float last_error;
 		float integral;
 		float derivada;
 		float pid;
-		// :: ----- ::
-		byte estado;
+		byte status;
 	};
 
-	void setup_rele(unsigned long curr_ms, struct Rele& rele) {
-		pinMode(RELE1PIN, OUTPUT);
-		pinMode(LEDRPIN, OUTPUT);
-		rele.last_ms = curr_ms - PERIODO_RELE_MS;
-		rele.estado = LOW;
-		// :: new16 ::
-		rele.duty_cycle = 0;
-		rele.error = 0;
-		rele.last_error = rele.error;
-		rele.integral = 0;
-		rele.derivada = 0;
-		rele.pid = 0;
-		// :: ----- ::
+	void setup_relay(unsigned long curr_ms, struct Relay& relay) {
+		pinMode(RELAY_PIN, OUTPUT);
+		pinMode(RED_PIN, OUTPUT);
+		relay.last_ms = curr_ms - RELAY_PERIOD;
+		relay.status = LOW;
+		relay.duty_cycle = 0;
+		relay.error = 0;
+		relay.last_error = relay.error;
+		relay.integral = 0;
+		relay.derivada = 0;
+		relay.pid = 0;
 	}
 
-	void tarea_rele(unsigned long curr_ms, float tmp_val, struct Rele& rele) {
-		// :: new15 ::
-		if (curr_ms - rele.last_ms >= PERIODO_RELE_MS) {
-			// :: new16 ::
-			rele.error = TMP_REF - tmp_val;
-			rele.integral = rele.integral + (rele.error * PERIODO_RELE_MS * 0.001);
-			rele.derivada = (rele.error - rele.last_error) / (PERIODO_RELE_MS * 0.001);
-			rele.pid = KP * rele.error + KI * rele.integral + KD * rele.derivada;
-			rele.last_error = rele.error;
-			// :: ----- ::
+	void loop_relay(unsigned long curr_ms, float tmp_val, struct Relay& relay) {
+		if (curr_ms - relay.last_ms >= RELAY_PERIOD) {
+			relay.error = DESIRED_TEMP - tmp_val;
+			relay.integral = relay.integral + (relay.error * RELAY_PERIOD * 0.001);
+			relay.derivada = (relay.error - relay.last_error) / (RELAY_PERIOD * 0.001);
+			relay.pid = KP * relay.error + KI * relay.integral + KD * relay.derivada;
+			relay.last_error = relay.error;
 
-			rele.last_ms += PERIODO_RELE_MS;
+			relay.last_ms += RELAY_PERIOD;
 			
-			if (rele.pid <= 0) {
-				rele.estado = LOW;
-				rele.duty_cycle = 0 * PERIODO_RELE_MS / 100;
-			} else if (rele.pid > 0 && rele.pid < 5) {
-				rele.estado = HIGH;
-				rele.duty_cycle = (20 * rele.pid) * PERIODO_RELE_MS / 100;
+			if (relay.pid <= 0) {
+				relay.status = LOW;
+				relay.duty_cycle = 0 * RELAY_PERIOD / 100;
+			} else if (relay.pid > 0 && relay.pid < 5) {
+				relay.status = HIGH;
+				relay.duty_cycle = (20 * relay.pid) * RELAY_PERIOD / 100;
 			} else {
-				rele.estado = HIGH;
-				rele.duty_cycle = PERIODO_RELE_MS;
+				relay.status = HIGH;
+				relay.duty_cycle = RELAY_PERIOD;
 			}
 
-			digitalWrite(RELE1PIN, rele.estado);
-			digitalWrite(LEDRPIN, rele.estado);
+			digitalWrite(RELAY_PIN, relay.status);
+			digitalWrite(RED_PIN, relay.status);
 		}
 
-		if (curr_ms - rele.last_ms >= rele.duty_cycle) {
-			rele.duty_cycle = rele.last_ms + PERIODO_RELE_MS;
-			rele.estado = LOW;
-			digitalWrite(RELE1PIN, rele.estado);
-			digitalWrite(LEDRPIN, rele.estado);
+		if (curr_ms - relay.last_ms >= relay.duty_cycle) {
+			relay.duty_cycle = relay.last_ms + RELAY_PERIOD;
+			relay.status = LOW;
+			digitalWrite(RELAY_PIN, relay.status);
+			digitalWrite(RED_PIN, relay.status);
 		}
-		// :: --- ::
 	}
 
-	//-------------------------------------
+	// ================================
+	// Monitor
 
 	struct Monitor {
 		unsigned long last_ms;
@@ -581,8 +567,8 @@ namespace user__ {
 
 	void setup_monitor(unsigned long curr_ms, struct Monitor& mtr) {
 		Serial.begin(9600);
+
 		if (Serial) {
-			// :: new16 ::
 			Serial.print("#> SIMULACION Arduino Control de Temperatura PID ");
 			Serial.print(KP);
 			Serial.print(" ");
@@ -590,40 +576,42 @@ namespace user__ {
 			Serial.print(" ");
 			Serial.print(KD);
 			Serial.println(" (5000ms)");
-			// :: --- ::
 			Serial.println("#$ -y20:45 -w4 -l36 -l38 -l40 -tTemperatura -tCalefactor");
 		}
-		mtr.last_ms = curr_ms - PERIODO_MTR_MS;
+
+		mtr.last_ms = curr_ms - MONITOR_PERIOD;
 	}
 
-	void tarea_monitor(unsigned long curr_ms, struct Monitor& mtr, const struct Tmp& tmp, const struct Rele& rele) {
-		if (curr_ms - mtr.last_ms >= PERIODO_MTR_MS) {
-			mtr.last_ms += PERIODO_MTR_MS;
+	void loop_monitor(unsigned long curr_ms, struct Monitor& mtr, const struct Temperature& tmp, const struct Relay& relay) {
+		if (curr_ms - mtr.last_ms >= MONITOR_PERIOD) {
+			mtr.last_ms += MONITOR_PERIOD;
+
 			if (Serial) {
 				Serial.print(tmp.val);
 				Serial.print(" ");
-				Serial.println(rele.estado);
+				Serial.println(relay.status);
 			}
 		}
 	}
 
-	//-------------------------------------
+	// ================================
+	// Main loop
 
 	struct Monitor mtr;
-	struct Tmp tmp;
-	struct Rele rele;
+	struct Temperature tmp;
+	struct Relay relay;
 
 	void setup() {
 		unsigned long curr_ms = millis();
-		setup_tmp(curr_ms, tmp);
-		setup_rele(curr_ms, rele);
+		setup_temperature(curr_ms, tmp);
+		setup_relay(curr_ms, relay);
 		setup_monitor(curr_ms, mtr);
 	}
 
 	void loop() {
 		unsigned long curr_ms = millis();
-		tarea_tmp(curr_ms, tmp);
-		tarea_rele(curr_ms, tmp.val, rele);
-		tarea_monitor(curr_ms, mtr, tmp, rele);
+		loop_temperature(curr_ms, tmp);
+		loop_relay(curr_ms, tmp.val, relay);
+		loop_monitor(curr_ms, mtr, tmp, relay);
 	}
 }
